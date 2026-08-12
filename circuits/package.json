@@ -1,0 +1,9 @@
+{
+  "name": "meritpay-circuits",
+  "version": "1.0.0",
+  "description": "ZK circuits for MeritPay payroll system",
+  "dependencies": {
+    "circomlib": "^2.0.5",
+    "snarkjs": "^0.7.4"
+  }
+}
