@@ -29,6 +29,11 @@ template ClaimPayout() {
 
     salesFlag * (1 - salesFlag) === 0;
 
+    // Enforce baseSalary > 0 to prevent division by zero
+    signal invSalary;
+    invSalary <-- 1 / baseSalary;
+    invSalary * baseSalary === 1;
+
     component nullHash = Poseidon(3);
     nullHash.inputs[0] <== employeeId;
     nullHash.inputs[1] <== payrollEpoch;
@@ -56,10 +61,6 @@ template ClaimPayout() {
     signal payout;
     payout <== baseSalary + bonus;
     amount === payout;
-
-    signal invSalary;
-    invSalary <-- 1 / baseSalary;
-    invSalary * baseSalary === 1;
 }
 
 component main {public [nullifier, payrollEpoch, amount]} = ClaimPayout();
