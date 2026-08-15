@@ -13,8 +13,14 @@ const { execSync } = require('child_process');
 const VK_PATH = process.argv[2] || path.join(__dirname, '../build/payroll/payroll_aggregator_vkey.json');
 const VERIFIER_ID = process.argv[3] || process.env.NEXT_PUBLIC_VERIFIER_CONTRACT_ID ||
   'CBT4QOMJFDYVJMJMHLGWSX5GZI4UMTYNLB7MIVMUIDX2MH73OEENUAYK';
+const ADMIN_ADDRESS = process.argv[4] || process.env.DEPLOYER_ADDRESS || process.env.NEXT_PUBLIC_ADMIN_ADDRESS;
 const NETWORK = process.env.STELLAR_NETWORK || 'testnet';
 const SOURCE = process.env.DEPLOYER_KEY_NAME || 'deployer';
+
+if (!ADMIN_ADDRESS) {
+  console.error('Missing admin address: pass as 4th arg or set DEPLOYER_ADDRESS');
+  process.exit(1);
+}
 
 const vkey = JSON.parse(fs.readFileSync(VK_PATH, 'utf8'));
 
@@ -68,7 +74,7 @@ console.log('Uploading VK to verifier contract...');
 
 try {
   const result = execSync(
-    `stellar contract invoke --id ${VERIFIER_ID} --network ${NETWORK} --source-account ${SOURCE} -- set_vk --vk_bytes ${hexStr}`,
+    `stellar contract invoke --id ${VERIFIER_ID} --network ${NETWORK} --source-account ${SOURCE} -- set_vk --admin ${ADMIN_ADDRESS} --vk_bytes ${hexStr}`,
     { encoding: 'utf8', stdio: 'pipe' }
   );
   console.log('VK uploaded successfully:', result.trim());
