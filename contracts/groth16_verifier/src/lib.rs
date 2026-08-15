@@ -62,36 +62,48 @@ pub struct StoredVk {
 // Byte-level helpers
 // ---------------------------------------------------------------------------
 
-fn read_g1(env: &Env, src: &Bytes, offset: u32) -> Bn254G1Affine {
+fn read_g1(_env: &Env, src: &Bytes, offset: u32) -> Result<Bn254G1Affine, VerifierError> {
+    if offset + 64 > src.len() {
+        return Err(VerifierError::InvalidVkLength);
+    }
     let slice: BytesN<64> = src
         .slice(offset..offset + 64)
         .try_into()
-        .unwrap_or_else(|_| BytesN::from_array(env, &[0u8; 64]));
-    Bn254G1Affine::from_bytes(slice)
+        .map_err(|_| VerifierError::InvalidVkLength)?;
+    Ok(Bn254G1Affine::from_bytes(slice))
 }
 
-fn read_g2(env: &Env, src: &Bytes, offset: u32) -> Bn254G2Affine {
+fn read_g2(_env: &Env, src: &Bytes, offset: u32) -> Result<Bn254G2Affine, VerifierError> {
+    if offset + 128 > src.len() {
+        return Err(VerifierError::InvalidVkLength);
+    }
     let slice: BytesN<128> = src
         .slice(offset..offset + 128)
         .try_into()
-        .unwrap_or_else(|_| BytesN::from_array(env, &[0u8; 128]));
-    Bn254G2Affine::from_bytes(slice)
+        .map_err(|_| VerifierError::InvalidVkLength)?;
+    Ok(Bn254G2Affine::from_bytes(slice))
 }
 
-fn read_fr(env: &Env, src: &Bytes, offset: u32) -> Bn254Fr {
+fn read_fr(_env: &Env, src: &Bytes, offset: u32) -> Result<Bn254Fr, VerifierError> {
+    if offset + 32 > src.len() {
+        return Err(VerifierError::InvalidVkLength);
+    }
     let slice: BytesN<32> = src
         .slice(offset..offset + 32)
         .try_into()
-        .unwrap_or_else(|_| BytesN::from_array(env, &[0u8; 32]));
-    Bn254Fr::from_bytes(slice)
+        .map_err(|_| VerifierError::InvalidVkLength)?;
+    Ok(Bn254Fr::from_bytes(slice))
 }
 
-fn read_u32_be(src: &Bytes, offset: u32) -> u32 {
-    let b0 = src.get(offset).unwrap_or(0) as u32;
-    let b1 = src.get(offset + 1).unwrap_or(0) as u32;
-    let b2 = src.get(offset + 2).unwrap_or(0) as u32;
-    let b3 = src.get(offset + 3).unwrap_or(0) as u32;
-    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+fn read_u32_be(src: &Bytes, offset: u32) -> Result<u32, VerifierError> {
+    if offset + 4 > src.len() {
+        return Err(VerifierError::InvalidVkLength);
+    }
+    let b0 = src.get(offset).ok_or(VerifierError::InvalidVkLength)? as u32;
+    let b1 = src.get(offset + 1).ok_or(VerifierError::InvalidVkLength)? as u32;
+    let b2 = src.get(offset + 2).ok_or(VerifierError::InvalidVkLength)? as u32;
+    let b3 = src.get(offset + 3).ok_or(VerifierError::InvalidVkLength)? as u32;
+    Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +138,7 @@ impl Groth16Verifier {
         if vk_bytes.len() < 516 {
             return Err(VerifierError::InvalidVkLength);
         }
-        let n_ic = read_u32_be(&vk_bytes, 448);
+        let n_ic = read_u32_be(&vk_bytes, 448)?;
         if n_ic == 0 {
             return Err(VerifierError::InvalidVkLength);
         }
@@ -168,23 +180,23 @@ impl Groth16Verifier {
         }
 
         // 3. Validate public signal count
-        let n_ic = read_u32_be(&vk, 448);
+        let n_ic = read_u32_be(&vk, 448)?;
         let n_public = n_ic - 1;
         if public_signals.len() as u32 != n_public {
             return Err(VerifierError::SignalCountMismatch);
         }
 
         // 4. Parse proof
-        let pi_a = read_g1(&env, &proof_bytes, 0);
-        let pi_b = read_g2(&env, &proof_bytes, 64);
-        let pi_c = read_g1(&env, &proof_bytes, 192);
+        let pi_a = read_g1(&env, &proof_bytes, 0)?;
+        let pi_b = read_g2(&env, &proof_bytes, 64)?;
+        let pi_c = read_g1(&env, &proof_bytes, 192)?;
 
         // 5. Parse VK
-        let vk_alpha = read_g1(&env, &vk, 0);
-        let vk_beta  = read_g2(&env, &vk, 64);
-        let vk_gamma = read_g2(&env, &vk, 192);
-        let vk_delta = read_g2(&env, &vk, 320);
-        let ic0      = read_g1(&env, &vk, 452);
+        let vk_alpha = read_g1(&env, &vk, 0)?;
+        let vk_beta  = read_g2(&env, &vk, 64)?;
+        let vk_gamma = read_g2(&env, &vk, 192)?;
+        let vk_delta = read_g2(&env, &vk, 320)?;
+        let ic0      = read_g1(&env, &vk, 452)?;
 
         // 6. Compute vk_x = ic[0] + MSM( ic[1..], public_signals )
         let bn254 = env.crypto().bn254();
@@ -197,11 +209,13 @@ impl Groth16Verifier {
 
             for i in 0..n_public {
                 // IC points start at byte 452; ic[0] at 452, ic[i+1] at 452+64+i*64
-                let ic_i = read_g1(&env, &vk, 516 + i * 64);
+                let ic_i = read_g1(&env, &vk, 516 + i * 64)?;
                 msm_points.push_back(ic_i);
 
                 // Convert BytesN<32> public signal → Bn254Fr
-                let sig_bytes: BytesN<32> = public_signals.get(i).unwrap();
+                let sig_bytes: BytesN<32> = public_signals
+                    .get(i)
+                    .ok_or(VerifierError::SignalCountMismatch)?;
                 let fr = Bn254Fr::from_bytes(sig_bytes);
                 msm_scalars.push_back(fr);
             }

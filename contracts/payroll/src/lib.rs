@@ -173,7 +173,11 @@ impl PayrollContract {
 
         funder.require_auth();
 
-        let token_addr: Address = env.storage().persistent().get(&key_token()).unwrap();
+        let token_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_token())
+            .ok_or(PayrollError::NotInitialized)?;
         let token = token::Client::new(&env, &token_addr);
         token.transfer(&funder, &env.current_contract_address(), &amount);
 
@@ -225,7 +229,11 @@ impl PayrollContract {
 
         // Auth + admin check
         caller.require_auth();
-        let admin: Address = env.storage().persistent().get(&key_admin()).unwrap();
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
         if caller != admin {
             return Err(PayrollError::Unauthorized);
         }
@@ -247,7 +255,9 @@ impl PayrollContract {
 
         // Nullifier pre-check — reject batch if ANY nullifier is already spent
         for i in 0..nullifiers.len() {
-            let nul = nullifiers.get(i).unwrap();
+            let nul = nullifiers
+                .get(i)
+                .ok_or(PayrollError::InvalidAmount)?;
             let spent: bool = env
                 .storage()
                 .persistent()
@@ -259,8 +269,11 @@ impl PayrollContract {
         }
 
         // ZK proof verification via cross-contract call
-        let verifier_addr: Address =
-            env.storage().persistent().get(&key_verifier()).unwrap();
+        let verifier_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_verifier())
+            .ok_or(PayrollError::NotInitialized)?;
         let verifier = VerifierClient::new(&env, &verifier_addr);
         let valid = verifier.verify(&proof, &public_signals);
         if !valid {
@@ -269,7 +282,9 @@ impl PayrollContract {
 
         // Commit: mark nullifiers as spent
         for i in 0..nullifiers.len() {
-            let nul = nullifiers.get(i).unwrap();
+            let nul = nullifiers
+                .get(i)
+                .ok_or(PayrollError::InvalidAmount)?;
             env.storage().persistent().set(&nul, &true);
         }
 
@@ -283,7 +298,11 @@ impl PayrollContract {
             .persistent()
             .get(&key_claim())
             .ok_or(PayrollError::ClaimNotConfigured)?;
-        let token_addr: Address = env.storage().persistent().get(&key_token()).unwrap();
+        let token_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_token())
+            .ok_or(PayrollError::NotInitialized)?;
         let token = token::Client::new(&env, &token_addr);
         token.transfer(
             &env.current_contract_address(),
@@ -323,8 +342,11 @@ impl PayrollContract {
     ) -> Result<bool, PayrollError> {
         Self::assert_initialized(&env)?;
 
-        let verifier_addr: Address =
-            env.storage().persistent().get(&key_verifier()).unwrap();
+        let verifier_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_verifier())
+            .ok_or(PayrollError::NotInitialized)?;
         let verifier = VerifierClient::new(&env, &verifier_addr);
         Ok(verifier.verify(&proof, &public_signals))
     }
@@ -378,7 +400,11 @@ impl PayrollContract {
         Self::assert_initialized(&env)?;
 
         admin.require_auth();
-        let stored_admin: Address = env.storage().persistent().get(&key_admin()).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
         if admin != stored_admin {
             return Err(PayrollError::Unauthorized);
         }
@@ -406,7 +432,11 @@ impl PayrollContract {
         Self::assert_initialized(&env)?;
 
         admin.require_auth();
-        let stored_admin: Address = env.storage().persistent().get(&key_admin()).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
         if admin != stored_admin {
             return Err(PayrollError::Unauthorized);
         }

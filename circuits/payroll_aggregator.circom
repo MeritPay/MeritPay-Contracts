@@ -55,6 +55,7 @@ template PayrollAggregator(n) {
     signal bonus[n];              // bonus payout per employee
     signal payout[n];             // total payout per employee
     signal runningSum[n+1];       // partial sums; runningSum[n] === totalPayroll
+    signal invSalary[n];          // inverse of baseSalary, enforces > 0
 
     // ---------------------------------------------------------------
     // Component arrays — all declared at template scope
@@ -62,6 +63,7 @@ template PayrollAggregator(n) {
     component ltHours[n];   // LessThan comparator for hours check
     component kpiHash[n];   // Poseidon(employeeId, hoursWorked, salesFlag, salt)
     component nullHash[n];  // Poseidon(employeeId, payrollEpoch, salt)
+    component ltSalary[n];  // LessThan comparator for baseSalaries[i] < 2^40
 
     // ---------------------------------------------------------------
     // Initialise running sum
@@ -76,15 +78,15 @@ template PayrollAggregator(n) {
         salesFlags[i] * (1 - salesFlags[i]) === 0;
 
         // -----------------------------------------------------------
-        // B. Constrain baseSalary > 0
-        //    We enforce this by requiring an inverse to exist.
-        //    invSalary * baseSalaries[i] === 1  →  baseSalaries[i] != 0
-        //    (declared as a separate template-scope array — see below)
+        // B. Constrain baseSalary > 0 (early check for safety)
+        //    Only a non-zero field element has an inverse.
+        //    This prevents division by zero in witness calculations.
         // -----------------------------------------------------------
-        // (see invSalary[n] and ltSalary[n] declared below the loop)
+        invSalary[i] <-- 1 / baseSalaries[i];
+        invSalary[i] * baseSalaries[i] === 1;
 
         // -----------------------------------------------------------
-        // C. Determine hoursMet[i]: 1 iff hoursWorked[i] >= hoursThresholds[i]
+        // D. Determine hoursMet[i]: 1 iff hoursWorked[i] >= hoursThresholds[i]
         //
         //    LessThan(14) outputs 1 when in[0] < in[1].
         //    14 bits covers hours up to 16 383 (well above ~10 000 max).
@@ -101,13 +103,13 @@ template PayrollAggregator(n) {
         hoursMet[i] * (1 - hoursMet[i]) === 0;
 
         // -----------------------------------------------------------
-        // D. bonusRate[i] = hoursMet[i]*20 + salesFlags[i]*10
+        // E. bonusRate[i] = hoursMet[i]*20 + salesFlags[i]*10
         //    Linear — no extra multiplication signal required.
         // -----------------------------------------------------------
         bonusRate[i] <== hoursMet[i] * 20 + salesFlags[i] * 10;
 
         // -----------------------------------------------------------
-        // E. Bonus without division (R1CS-safe)
+        // F. Bonus without division (R1CS-safe)
         //    bonus[i] * 100 === baseSalaries[i] * bonusRate[i]
         //
         //    R1CS allows exactly one multiplication per constraint, so
@@ -122,17 +124,17 @@ template PayrollAggregator(n) {
         bonus[i] * 100 === salaryTimesRate[i];
 
         // -----------------------------------------------------------
-        // F. payout[i] = baseSalaries[i] + bonus[i]  (linear)
+        // G. payout[i] = baseSalaries[i] + bonus[i]  (linear)
         // -----------------------------------------------------------
         payout[i] <== baseSalaries[i] + bonus[i];
 
         // -----------------------------------------------------------
-        // G. Accumulate running total
+        // H. Accumulate running total
         // -----------------------------------------------------------
         runningSum[i+1] <== runningSum[i] + payout[i];
 
         // -----------------------------------------------------------
-        // H. KPI commitment binds all private inputs to this epoch.
+        // I. KPI commitment binds all private inputs to this epoch.
         //    kpiHash[i].out is a cryptographic commitment; it is not
         //    exposed as a public output here, but it constrains the
         //    witness so the prover cannot substitute different values.
@@ -148,7 +150,7 @@ template PayrollAggregator(n) {
         // To make it public, add: signal output kpiCommitments[n]; kpiCommitments[i] <== kpiHash[i].out;
 
         // -----------------------------------------------------------
-        // I. Anti-replay: verify the provided public nullifier matches
+        // J. Anti-replay: verify the provided public nullifier matches
         //    the hash derived from private data.
         //
         //    nullifier[i] = Poseidon(employeeId, payrollEpoch, salt)
@@ -160,32 +162,21 @@ template PayrollAggregator(n) {
 
         // Enforce the public nullifier matches the witness-derived hash
         nullifiers[i] === nullHash[i].out;
-    }
 
-    // ---------------------------------------------------------------
-    // J. Verify totalPayroll equals the accumulated sum of all payouts
-    // ---------------------------------------------------------------
-    totalPayroll === runningSum[n];
-
-    // ---------------------------------------------------------------
-    // K. baseSalary range checks (declared here to stay at template scope)
-    //    invSalary[i] * baseSalaries[i] === 1  enforces baseSalaries[i] != 0
-    // ---------------------------------------------------------------
-    signal invSalary[n];
-    component ltSalary[n];   // baseSalaries[i] < 2^40
-
-    for (var i = 0; i < n; i++) {
-        // Non-zero check: only a non-zero field element has an inverse
-        invSalary[i] <-- 1 / baseSalaries[i];
-        invSalary[i] * baseSalaries[i] === 1;
-
-        // Upper bound: baseSalaries[i] < 2^40
-        // LessThan(41) so in[1]=2^40 fits within 41-bit range (avoids boundary overflow)
+        // -----------------------------------------------------------
+        // K. Upper bound for baseSalaries[i]: baseSalaries[i] < 2^40
+        //    LessThan(41) so in[1]=2^40 fits within 41-bit range
+        // -----------------------------------------------------------
         ltSalary[i] = LessThan(41);
         ltSalary[i].in[0] <== baseSalaries[i];
         ltSalary[i].in[1] <== 1099511627776; // 2^40
         ltSalary[i].out === 1;
     }
+
+    // ---------------------------------------------------------------
+    // L. Verify totalPayroll equals the accumulated sum of all payouts
+    // ---------------------------------------------------------------
+    totalPayroll === runningSum[n];
 }
 
 // ---------------------------------------------------------------

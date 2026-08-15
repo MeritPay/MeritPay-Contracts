@@ -119,13 +119,22 @@ impl ClaimContract {
         if public_signals.len() != 3 {
             return Err(ClaimError::SignalMismatch);
         }
-        if public_signals.get(0).unwrap() != nullifier {
+        
+        let first_signal = public_signals
+            .get(0)
+            .ok_or(ClaimError::SignalMismatch)?;
+        if first_signal != nullifier {
             return Err(ClaimError::SignalMismatch);
         }
 
-        let payroll_addr: Address = env.storage().persistent().get(&key_payroll()).unwrap();
+        let payroll_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_payroll())
+            .ok_or(ClaimError::NotInitialized)?;
         let payroll = PayrollClient::new(&env, &payroll_addr);
 
+        // Nullifier must have been spent in a payroll batch to be valid
         if !payroll.is_nullifier_spent(&nullifier) {
             return Err(ClaimError::NullifierNotAuthorized);
         }
@@ -140,19 +149,27 @@ impl ClaimContract {
         }
 
         let on_chain_epoch = payroll.get_epoch();
-        let proof_epoch_bytes = public_signals.get(1).unwrap();
+        let proof_epoch_bytes = public_signals
+            .get(1)
+            .ok_or(ClaimError::SignalMismatch)?;
         let proof_epoch = Self::bytes_to_u64(&proof_epoch_bytes);
         if on_chain_epoch < proof_epoch {
             return Err(ClaimError::PayrollEpochNotExecuted);
         }
 
-        let proof_amount_bytes = public_signals.get(2).unwrap();
+        let proof_amount_bytes = public_signals
+            .get(2)
+            .ok_or(ClaimError::SignalMismatch)?;
         let proof_amount = Self::bytes_to_i128(&proof_amount_bytes);
         if proof_amount != amount {
             return Err(ClaimError::SignalMismatch);
         }
 
-        let verifier_addr: Address = env.storage().persistent().get(&key_verifier()).unwrap();
+        let verifier_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_verifier())
+            .ok_or(ClaimError::NotInitialized)?;
         let verifier = VerifierClient::new(&env, &verifier_addr);
         if !verifier.verify(&proof, &public_signals) {
             return Err(ClaimError::InvalidProof);
@@ -160,7 +177,11 @@ impl ClaimContract {
 
         env.storage().persistent().set(&nullifier, &true);
 
-        let token_addr: Address = env.storage().persistent().get(&key_token()).unwrap();
+        let token_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_token())
+            .ok_or(ClaimError::NotInitialized)?;
         let token = token::Client::new(&env, &token_addr);
         token.transfer(&env.current_contract_address(), &recipient, &amount);
 
