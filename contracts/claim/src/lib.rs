@@ -152,7 +152,7 @@ impl ClaimContract {
         let proof_epoch_bytes = public_signals
             .get(1)
             .ok_or(ClaimError::SignalMismatch)?;
-        let proof_epoch = Self::bytes_to_u64(&proof_epoch_bytes);
+        let proof_epoch = Self::bytes_to_u64(&proof_epoch_bytes)?;
         if on_chain_epoch < proof_epoch {
             return Err(ClaimError::PayrollEpochNotExecuted);
         }
@@ -160,7 +160,7 @@ impl ClaimContract {
         let proof_amount_bytes = public_signals
             .get(2)
             .ok_or(ClaimError::SignalMismatch)?;
-        let proof_amount = Self::bytes_to_i128(&proof_amount_bytes);
+        let proof_amount = Self::bytes_to_i128(&proof_amount_bytes)?;
         if proof_amount != amount {
             return Err(ClaimError::SignalMismatch);
         }
@@ -207,18 +207,34 @@ impl ClaimContract {
         Ok(())
     }
 
-    fn bytes_to_u64(bytes: &BytesN<32>) -> u64 {
+    /// Converts a 32-byte BN254 field-element public signal into a `u64`.
+    ///
+    /// The circuit does not constrain this signal to fit in 64 bits, so a
+    /// malicious prover could choose a field element whose low 8 bytes equal
+    /// any desired `u64` while the high 24 bytes are non-zero (i.e. the true
+    /// field value is astronomically larger than the truncated result).
+    /// Rejecting any non-zero high-order bytes ensures the on-chain integer
+    /// is a faithful, non-wrapped representation of the signal.
+    fn bytes_to_u64(bytes: &BytesN<32>) -> Result<u64, ClaimError> {
         let arr = bytes.to_array();
+        if arr[0..24].iter().any(|&b| b != 0) {
+            return Err(ClaimError::SignalMismatch);
+        }
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&arr[24..32]);
-        u64::from_be_bytes(buf)
+        Ok(u64::from_be_bytes(buf))
     }
 
-    fn bytes_to_i128(bytes: &BytesN<32>) -> i128 {
+    /// Converts a 32-byte BN254 field-element public signal into an `i128`.
+    /// See `bytes_to_u64` for why the high-order bytes must be checked.
+    fn bytes_to_i128(bytes: &BytesN<32>) -> Result<i128, ClaimError> {
         let arr = bytes.to_array();
+        if arr[0..16].iter().any(|&b| b != 0) {
+            return Err(ClaimError::SignalMismatch);
+        }
         let mut buf = [0u8; 16];
         buf.copy_from_slice(&arr[16..32]);
-        i128::from_be_bytes(buf)
+        Ok(i128::from_be_bytes(buf))
     }
 }
 
