@@ -118,7 +118,7 @@ Rust workspace with three contracts, compiled to `wasm32v1-none`:
 
 Generic BN254 Groth16 verifier using Soroban's native pairing host functions (`soroban_sdk::crypto::bn254`). Deployed **twice** in production — once per verification key, since a single instance only holds one VK.
 
-- `set_vk(vk_bytes)` — stores the verification key as raw bytes (alpha/beta/gamma/delta G1/G2 points + IC array)
+- `set_vk(admin, vk_bytes)` — stores the verification key as raw bytes (alpha/beta/gamma/delta G1/G2 points + IC array); the first caller becomes the admin for this verifier instance, and only that admin may call `set_vk` again to rotate the key
 - `verify(proof_bytes, public_signals) -> bool` — checks the Groth16 pairing equation `e(A,B) · e(-alpha,beta) · e(-vk_x,gamma) · e(-C,delta) == 1`, where `vk_x = ic[0] + MSM(ic[1..], public_signals)`
 
 Wire format: proof is 256 bytes (`pi_a`: G1/64B, `pi_b`: G2/128B, `pi_c`: G1/64B); all field/curve coordinates are big-endian, 32 bytes per limb.
@@ -143,7 +143,7 @@ Holds the payroll pool and gates batch execution.
 
 Holds escrow released by `payroll.execute_payroll` and pays out individual employees.
 
-- `initialize(payroll_contract, verifier_contract, token_address)`
+- `initialize(admin, payroll_contract, verifier_contract, token_address)` — `admin.require_auth()` gates the one-time setup
 - `claim_payout(recipient, proof, public_signals, nullifier, amount)` — `recipient.require_auth()` (the employee's Freighter wallet must sign), checks `public_signals[0] == nullifier`, cross-calls `payroll.is_nullifier_spent(nullifier)` to confirm the batch executed, decodes `public_signals[1]` as the payroll epoch and requires it's `<=` the on-chain epoch, decodes `public_signals[2]` as the claimed amount and requires it **exactly** equals the `amount` argument (both in stroops), verifies the Groth16 proof, transfers `amount` to `recipient`, and marks the nullifier claimed
 - `is_claimed(nullifier)` — read-only
 

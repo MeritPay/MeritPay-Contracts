@@ -68,6 +68,7 @@ pub struct ClaimContract;
 impl ClaimContract {
     pub fn initialize(
         env: Env,
+        admin: Address,
         payroll_contract: Address,
         verifier_contract: Address,
         token_address: Address,
@@ -75,6 +76,8 @@ impl ClaimContract {
         if env.storage().persistent().has(&key_payroll()) {
             return Err(ClaimError::AlreadyInitialized);
         }
+
+        admin.require_auth();
 
         env.storage()
             .persistent()
@@ -155,11 +158,11 @@ impl ClaimContract {
             return Err(ClaimError::InvalidProof);
         }
 
+        env.storage().persistent().set(&nullifier, &true);
+
         let token_addr: Address = env.storage().persistent().get(&key_token()).unwrap();
         let token = token::Client::new(&env, &token_addr);
         token.transfer(&env.current_contract_address(), &recipient, &amount);
-
-        env.storage().persistent().set(&nullifier, &true);
 
         env.events().publish(
             (symbol_short!("claim"),),
@@ -236,6 +239,7 @@ mod tests {
     }
 
     fn setup(env: &Env) -> (Address, Address, Address, Address) {
+        let admin = Address::generate(env);
         let recipient = Address::generate(env);
         let payroll_id = env.register(mock_payroll::MockPayroll, ());
         let verifier_id = env.register(mock_ok::MockOk, ());
@@ -247,7 +251,7 @@ mod tests {
         env.mock_all_auths();
 
         let client = ClaimContractClient::new(env, &claim_id);
-        client.initialize(&payroll_id, &verifier_id, &xlm_id);
+        client.initialize(&admin, &payroll_id, &verifier_id, &xlm_id);
 
         let xlm = token::StellarAssetClient::new(env, &xlm_id);
         xlm.mint(&recipient, &1_000_0000000i128);
