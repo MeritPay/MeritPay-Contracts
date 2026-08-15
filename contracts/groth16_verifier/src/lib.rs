@@ -29,7 +29,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Bytes, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN,
+    Env, Vec,
 };
 use soroban_sdk::crypto::bn254::{Bn254Fr, Bn254G1Affine, Bn254G2Affine};
 
@@ -45,6 +46,7 @@ pub enum VerifierError {
     InvalidProofLength = 2,
     SignalCountMismatch = 3,
     InvalidVkLength    = 4,
+    Unauthorized       = 5,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,9 +103,24 @@ pub struct Groth16Verifier;
 
 #[contractimpl]
 impl Groth16Verifier {
-    /// Store the verification key. Must be called once after deployment.
+    /// Store the verification key. The first caller becomes the admin for
+    /// this verifier instance; only that admin may update the VK afterwards.
     /// `vk_bytes` must follow the wire format in the module doc.
-    pub fn set_vk(env: Env, vk_bytes: Bytes) -> Result<(), VerifierError> {
+    pub fn set_vk(env: Env, admin: Address, vk_bytes: Bytes) -> Result<(), VerifierError> {
+        admin.require_auth();
+
+        let admin_key = symbol_short!("admin");
+        match env.storage().persistent().get::<_, Address>(&admin_key) {
+            Some(stored_admin) => {
+                if stored_admin != admin {
+                    return Err(VerifierError::Unauthorized);
+                }
+            }
+            None => {
+                env.storage().persistent().set(&admin_key, &admin);
+            }
+        }
+
         // Minimum: alpha(64)+beta(128)+gamma(128)+delta(128)+n_ic(4) = 452
         // plus at least one IC point (64 bytes) → 516 bytes minimum.
         if vk_bytes.len() < 516 {
@@ -224,7 +241,7 @@ impl Groth16Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::Env;
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn dummy_vk_bytes(env: &Env, n_public: u32) -> Bytes {
         let n_ic = n_public + 1;
@@ -245,28 +262,47 @@ mod tests {
     #[test]
     fn test_set_vk_and_has_vk() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(Groth16Verifier, ());
         let client = Groth16VerifierClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
         assert!(!client.has_vk());
-        client.set_vk(&dummy_vk_bytes(&env, 3));
+        client.set_vk(&admin, &dummy_vk_bytes(&env, 3));
         assert!(client.has_vk());
     }
 
     #[test]
     fn test_set_vk_rejects_too_short() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(Groth16Verifier, ());
         let client = Groth16VerifierClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
         let short = Bytes::from_slice(&env, &[0u8; 100]);
-        assert!(client.try_set_vk(&short).is_err());
+        assert!(client.try_set_vk(&admin, &short).is_err());
+    }
+
+    #[test]
+    fn test_set_vk_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(Groth16Verifier, ());
+        let client = Groth16VerifierClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.set_vk(&admin, &dummy_vk_bytes(&env, 3));
+        let result = client.try_set_vk(&attacker, &dummy_vk_bytes(&env, 3));
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_verify_rejects_wrong_proof_length() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(Groth16Verifier, ());
         let client = Groth16VerifierClient::new(&env, &contract_id);
-        client.set_vk(&dummy_vk_bytes(&env, 1));
+        let admin = Address::generate(&env);
+        client.set_vk(&admin, &dummy_vk_bytes(&env, 1));
         let short_proof = Bytes::from_slice(&env, &[0u8; 128]);
         let signals: Vec<BytesN<32>> = Vec::new(&env);
         assert!(client.try_verify(&short_proof, &signals).is_err());
@@ -275,9 +311,11 @@ mod tests {
     #[test]
     fn test_verify_rejects_signal_count_mismatch() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(Groth16Verifier, ());
         let client = Groth16VerifierClient::new(&env, &contract_id);
-        client.set_vk(&dummy_vk_bytes(&env, 2));
+        let admin = Address::generate(&env);
+        client.set_vk(&admin, &dummy_vk_bytes(&env, 2));
         let proof = Bytes::from_slice(&env, &[0u8; 256]);
         let mut signals: Vec<BytesN<32>> = Vec::new(&env);
         signals.push_back(BytesN::from_array(&env, &[0u8; 32]));
