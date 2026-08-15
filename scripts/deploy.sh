@@ -310,7 +310,7 @@ section "7 / 10  Initialising contracts"
 if [[ -f "$PAYROLL_VKEY" ]]; then
     info "Uploading payroll VK to groth16_verifier..."
     NEXT_PUBLIC_VERIFIER_CONTRACT_ID="$VERIFIER_CONTRACT_ID" \
-        node "$PROJECT_ROOT/scripts/upload_vk.js" "$PAYROLL_VKEY" "$VERIFIER_CONTRACT_ID" \
+        node "$PROJECT_ROOT/scripts/upload_vk.js" "$PAYROLL_VKEY" "$VERIFIER_CONTRACT_ID" "$DEPLOYER_ADDRESS" \
         2>&1 || warn "Payroll VK upload failed — run: node scripts/upload_vk.js"
 else
     warn "Payroll vkey not found at $PAYROLL_VKEY — run ./scripts/setup.sh first"
@@ -318,7 +318,7 @@ fi
 
 if [[ -f "$CLAIM_VKEY" ]]; then
     info "Uploading claim VK to claim_verifier..."
-    node "$PROJECT_ROOT/scripts/upload_vk.js" "$CLAIM_VKEY" "$CLAIM_VERIFIER_CONTRACT_ID" \
+    node "$PROJECT_ROOT/scripts/upload_vk.js" "$CLAIM_VKEY" "$CLAIM_VERIFIER_CONTRACT_ID" "$DEPLOYER_ADDRESS" \
         2>&1 || warn "Claim VK upload failed — run: node scripts/upload_vk.js build/claim/claim_vkey.json $CLAIM_VERIFIER_CONTRACT_ID"
 else
     warn "Claim vkey not found at $CLAIM_VKEY — run ./scripts/setup.sh first"
@@ -347,6 +347,7 @@ $CLI contract invoke \
     --source-account "$DEPLOYER_KEY_NAME" \
     -- \
     initialize \
+    --admin "$DEPLOYER_ADDRESS" \
     --payroll_contract "$PAYROLL_CONTRACT_ID" \
     --verifier_contract "$CLAIM_VERIFIER_CONTRACT_ID" \
     --token_address "$NATIVE_TOKEN" \
