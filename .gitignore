@@ -3,4 +3,4 @@ build/
 .claude/settings.local.json
 target/
 node_modules/
-issues/
+.env.contracts
