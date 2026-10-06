@@ -133,23 +133,70 @@ Holds the payroll pool and gates batch execution.
 |---|---|---|
 | `initialize(admin, verifier_contract, token_address)` | once | Sets admin, verifier, and pool token (XLM or any SEP-41 asset) |
 | `fund_pool(funder, amount)` | anyone | Deposits `amount` into the pool |
-| `execute_payroll(caller, proof, public_signals, nullifiers, total_payroll)` | admin-only | Verifies the batch proof, rejects any already-spent nullifier, deducts the pool, transfers `total_payroll` to the linked claim contract, increments the payroll epoch |
+| `execute_payroll(caller, proof, public_signals, nullifiers, total_payroll)` | admin-only | Verifies the batch proof, rejects any already-spent nullifier, deducts the pool, transfers `total_payroll` to the linked claim contract, increments the payroll epoch (reverts if paused) |
 | `verify_auditor(proof, public_signals)` | anyone | Read-only proof check; does not touch state |
+| `set_verifier(admin, verifier_contract)` | admin-only | Rotates the linked Groth16 verifier contract address |
 | `set_verifier_vk_hash(admin, vk_hash)` | admin-only | Stores a SHA-256 digest of the expected VK so the frontend can detect a swapped VK cheaply |
 | `set_claim_contract(admin, claim_contract)` | admin-only | Links the claim contract that receives escrow |
-| `get_pool_balance()`, `is_nullifier_spent(nullifier)`, `get_epoch()` | anyone | Read-only views |
+| `set_paused(admin, paused)` | admin-only | Halts or resumes `execute_payroll` during maintenance |
+| `transfer_admin(admin, new_admin)` | admin-only | Step 1 of two-step admin transfer: sets `pending_admin` |
+| `accept_admin(new_admin)` | pending-admin | Step 2 of two-step admin transfer: claims the admin role |
+| `get_admin()`, `get_pending_admin()`, `get_verifier()`, `get_token()`, `get_claim_contract()`, `get_vk_hash()`, `is_paused()` | anyone | Read-only configuration views |
+| `get_pool_balance()`, `is_nullifier_spent(nullifier)`, `get_epoch()` | anyone | Read-only pool state views |
 
-`execute_payroll` errors: `NotInitialized`, `Unauthorized`, `InvalidAmount`, `InsufficientFunds`, `NullifierSpent`, `InvalidProof`, `ClaimNotConfigured`.
+`execute_payroll` errors: `NotInitialized`, `Unauthorized`, `InvalidAmount`, `InsufficientFunds`, `NullifierSpent`, `InvalidProof`, `ClaimNotConfigured`, `ContractPaused`.
 
 ### `claim`
 
 Holds escrow released by `payroll.execute_payroll` and pays out individual employees.
 
-- `initialize(admin, payroll_contract, verifier_contract, token_address)` — `admin.require_auth()` gates the one-time setup
-- `claim_payout(recipient, proof, public_signals, nullifier, amount)` — `recipient.require_auth()` (the employee's Freighter wallet must sign), checks `public_signals[0] == nullifier`, cross-calls `payroll.is_nullifier_spent(nullifier)` to confirm the batch executed, decodes `public_signals[1]` as the payroll epoch and requires it's `<=` the on-chain epoch, decodes `public_signals[2]` as the claimed amount and requires it **exactly** equals the `amount` argument (both in stroops), verifies the Groth16 proof, transfers `amount` to `recipient`, and marks the nullifier claimed
-- `is_claimed(nullifier)` — read-only
+- `initialize(admin, payroll_contract, verifier_contract, token_address)` — `admin.require_auth()` gates the one-time setup and records `admin`
+- `claim_payout(recipient, proof, public_signals, nullifier, amount)` — `recipient.require_auth()` (the employee's Freighter wallet must sign), checks `public_signals[0] == nullifier`, cross-calls `payroll.is_nullifier_spent(nullifier)` to confirm the batch executed, decodes `public_signals[1]` as the payroll epoch and requires it's `<=` the on-chain epoch, decodes `public_signals[2]` as the claimed amount and requires it **exactly** equals the `amount` argument (both in stroops), verifies the Groth16 proof, transfers `amount` to `recipient`, and marks the nullifier claimed (reverts if paused)
+- `set_verifier(admin, verifier_contract)` — admin-only rotation of the claim verifier
+- `set_payroll_contract(admin, payroll_contract)` — admin-only re-linking to an updated payroll contract
+- `set_paused(admin, paused)` — admin-only emergency pause
+- `transfer_admin(admin, new_admin)` & `accept_admin(new_admin)` — two-step admin rotation
+- `get_admin()`, `get_pending_admin()`, `get_payroll_contract()`, `get_verifier()`, `get_token()`, `is_paused()`, `is_claimed(nullifier)` — read-only views
 
-`claim_payout` errors: `NotInitialized`, `InvalidAmount`, `SignalMismatch`, `NullifierNotAuthorized`, `AlreadyClaimed`, `PayrollEpochNotExecuted`, `InvalidProof`. `SignalMismatch` (#9) is almost always a unit-conversion bug — see [The unit system](#the-unit-system---read-this-before-touching-amounts) below.
+`claim_payout` errors: `NotInitialized`, `InvalidAmount`, `SignalMismatch`, `NullifierNotAuthorized`, `AlreadyClaimed`, `PayrollEpochNotExecuted`, `InvalidProof`, `ContractPaused`. `SignalMismatch` (#9) is almost always a unit-conversion bug — see [The unit system](#the-unit-system---read-this-before-touching-amounts) below.
+
+### Contract configuration & administrative procedures
+
+#### 1. Verifier rotation
+If a circuit is recompiled or upgraded with new parameters and a new `groth16_verifier` instance is deployed:
+```bash
+# Update payroll contract verifier
+soroban contract invoke --id $PAYROLL_CONTRACT_ID --source admin -- \
+  set_verifier --admin $ADMIN_ADDRESS --verifier_contract $NEW_PAYROLL_VERIFIER_ID
+
+# Update claim contract verifier
+soroban contract invoke --id $CLAIM_CONTRACT_ID --source admin -- \
+  set_verifier --admin $ADMIN_ADDRESS --verifier_contract $NEW_CLAIM_VERIFIER_ID
+```
+
+#### 2. Two-step admin transfer
+To prevent accidental contract lockouts from mistyped addresses, admin transfers require two steps:
+1. Current admin nominates candidate:
+   ```bash
+   soroban contract invoke --id $CONTRACT_ID --source admin -- \
+     transfer_admin --admin $ADMIN_ADDRESS --new_admin $NEW_ADMIN_ADDRESS
+   ```
+2. Nominated address claims administration:
+   ```bash
+   soroban contract invoke --id $CONTRACT_ID --source new_admin -- \
+     accept_admin --new_admin $NEW_ADMIN_ADDRESS
+   ```
+
+#### 3. Emergency pause
+During incidents, migrations, or contract relinking:
+```bash
+soroban contract invoke --id $CONTRACT_ID --source admin -- \
+  set_paused --admin $ADMIN_ADDRESS --paused true
+```
+Unpausing restores normal batch execution and claim withdrawals.
+
+#### 4. Token immutability
+The pool token address (`token`) is immutable on both contracts once set in `initialize`. Allowing token rotation would compromise escrow invariants and create asset-substitution attack vectors. Supporting a new token requires deploying fresh contract instances.
 
 ## Two-step payroll flow, in detail
 
