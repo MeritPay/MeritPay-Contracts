@@ -28,8 +28,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, symbol_short,
-    token, Address, Bytes, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, symbol_short, token, Address, Bytes, BytesN, Env, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +55,12 @@ pub enum PayrollError {
     InvalidAmount = 7,
     /// Claim contract address has not been configured.
     ClaimNotConfigured = 8,
+    /// The contract is currently paused by the admin.
+    ContractPaused = 9,
+    /// No pending admin transfer exists to accept.
+    NoPendingAdmin = 10,
+    /// Proposed new admin is identical to current admin.
+    SameAdmin = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +70,10 @@ pub enum PayrollError {
 #[inline]
 fn key_admin() -> soroban_sdk::Symbol {
     symbol_short!("admin")
+}
+#[inline]
+fn key_pending_admin() -> soroban_sdk::Symbol {
+    symbol_short!("p_admin")
 }
 #[inline]
 fn key_verifier() -> soroban_sdk::Symbol {
@@ -90,6 +99,10 @@ fn key_vk_hash() -> soroban_sdk::Symbol {
 fn key_claim() -> soroban_sdk::Symbol {
     symbol_short!("claim")
 }
+#[inline]
+fn key_paused() -> soroban_sdk::Symbol {
+    symbol_short!("paused")
+}
 
 // ---------------------------------------------------------------------------
 // Cross-contract client for the Groth16Verifier
@@ -100,11 +113,7 @@ mod verifier_contract {
 
     #[contractclient(name = "VerifierClient")]
     pub trait VerifierInterface {
-        fn verify(
-            env: Env,
-            proof_bytes: Bytes,
-            public_signals: Vec<BytesN<32>>,
-        ) -> bool;
+        fn verify(env: Env, proof_bytes: Bytes, public_signals: Vec<BytesN<32>>) -> bool;
     }
 }
 
@@ -144,9 +153,7 @@ impl PayrollContract {
         env.storage()
             .persistent()
             .set(&key_verifier(), &verifier_contract);
-        env.storage()
-            .persistent()
-            .set(&key_token(), &token_address);
+        env.storage().persistent().set(&key_token(), &token_address);
         env.storage().persistent().set(&key_pool_bal(), &0i128);
         env.storage().persistent().set(&key_epoch(), &0u64);
 
@@ -181,19 +188,13 @@ impl PayrollContract {
         let token = token::Client::new(&env, &token_addr);
         token.transfer(&funder, &env.current_contract_address(), &amount);
 
-        let current: i128 = env
-            .storage()
-            .persistent()
-            .get(&key_pool_bal())
-            .unwrap_or(0);
+        let current: i128 = env.storage().persistent().get(&key_pool_bal()).unwrap_or(0);
         env.storage()
             .persistent()
             .set(&key_pool_bal(), &(current + amount));
 
-        env.events().publish(
-            (symbol_short!("fund"),),
-            (funder, amount),
-        );
+        env.events()
+            .publish((symbol_short!("fund"),), (funder, amount));
 
         Ok(())
     }
@@ -227,6 +228,15 @@ impl PayrollContract {
     ) -> Result<bool, PayrollError> {
         Self::assert_initialized(&env)?;
 
+        if env
+            .storage()
+            .persistent()
+            .get(&key_paused())
+            .unwrap_or(false)
+        {
+            return Err(PayrollError::ContractPaused);
+        }
+
         // Auth + admin check
         caller.require_auth();
         let admin: Address = env
@@ -244,20 +254,14 @@ impl PayrollContract {
         }
 
         // Pool balance check
-        let pool_bal: i128 = env
-            .storage()
-            .persistent()
-            .get(&key_pool_bal())
-            .unwrap_or(0);
+        let pool_bal: i128 = env.storage().persistent().get(&key_pool_bal()).unwrap_or(0);
         if pool_bal < total_payroll {
             return Err(PayrollError::InsufficientFunds);
         }
 
         // Nullifier pre-check — reject batch if ANY nullifier is already spent
         for i in 0..nullifiers.len() {
-            let nul = nullifiers
-                .get(i)
-                .ok_or(PayrollError::InvalidAmount)?;
+            let nul = nullifiers.get(i).ok_or(PayrollError::InvalidAmount)?;
             let spent: bool = env
                 .storage()
                 .persistent()
@@ -282,9 +286,7 @@ impl PayrollContract {
 
         // Commit: mark nullifiers as spent
         for i in 0..nullifiers.len() {
-            let nul = nullifiers
-                .get(i)
-                .ok_or(PayrollError::InvalidAmount)?;
+            let nul = nullifiers.get(i).ok_or(PayrollError::InvalidAmount)?;
             env.storage().persistent().set(&nul, &true);
         }
 
@@ -304,27 +306,15 @@ impl PayrollContract {
             .get(&key_token())
             .ok_or(PayrollError::NotInitialized)?;
         let token = token::Client::new(&env, &token_addr);
-        token.transfer(
-            &env.current_contract_address(),
-            &claim_addr,
-            &total_payroll,
-        );
+        token.transfer(&env.current_contract_address(), &claim_addr, &total_payroll);
 
         // Increment payroll epoch
-        let epoch: u64 = env
-            .storage()
-            .persistent()
-            .get(&key_epoch())
-            .unwrap_or(0);
+        let epoch: u64 = env.storage().persistent().get(&key_epoch()).unwrap_or(0);
         let next_epoch = epoch + 1;
-        env.storage()
-            .persistent()
-            .set(&key_epoch(), &next_epoch);
+        env.storage().persistent().set(&key_epoch(), &next_epoch);
 
-        env.events().publish(
-            (symbol_short!("payroll"),),
-            (epoch, total_payroll, new_bal),
-        );
+        env.events()
+            .publish((symbol_short!("payroll"),), (epoch, total_payroll, new_bal));
 
         Ok(true)
     }
@@ -356,11 +346,7 @@ impl PayrollContract {
     // -----------------------------------------------------------------------
     pub fn get_pool_balance(env: Env) -> Result<i128, PayrollError> {
         Self::assert_initialized(&env)?;
-        Ok(env
-            .storage()
-            .persistent()
-            .get(&key_pool_bal())
-            .unwrap_or(0))
+        Ok(env.storage().persistent().get(&key_pool_bal()).unwrap_or(0))
     }
 
     // -----------------------------------------------------------------------
@@ -378,11 +364,7 @@ impl PayrollContract {
     // -----------------------------------------------------------------------
     pub fn get_epoch(env: Env) -> Result<u64, PayrollError> {
         Self::assert_initialized(&env)?;
-        Ok(env
-            .storage()
-            .persistent()
-            .get(&key_epoch())
-            .unwrap_or(0))
+        Ok(env.storage().persistent().get(&key_epoch()).unwrap_or(0))
     }
 
     // -----------------------------------------------------------------------
@@ -411,10 +393,7 @@ impl PayrollContract {
 
         env.storage().persistent().set(&key_vk_hash(), &vk_hash);
 
-        env.events().publish(
-            (symbol_short!("vk_hash"),),
-            vk_hash,
-        );
+        env.events().publish((symbol_short!("vk_hash"),), vk_hash);
 
         Ok(())
     }
@@ -445,13 +424,248 @@ impl PayrollContract {
             .persistent()
             .set(&key_claim(), &claim_contract);
 
+        env.events()
+            .publish((symbol_short!("claimset"),), claim_contract);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // set_verifier
+    //
+    // Admin-only. Rotates the Groth16 verifier contract address.
+    // If `new_vk_hash` is provided (Some), updates the stored VK digest.
+    // If None is provided, clears the stored VK digest so off-chain clients
+    // never see a stale verification key hash for the rotated verifier.
+    // -----------------------------------------------------------------------
+    pub fn set_verifier(
+        env: Env,
+        admin: Address,
+        verifier_contract: Address,
+        new_vk_hash: Option<BytesN<32>>,
+    ) -> Result<(), PayrollError> {
+        Self::assert_initialized(&env)?;
+
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(PayrollError::Unauthorized);
+        }
+
+        let old_verifier: Address = env
+            .storage()
+            .persistent()
+            .get(&key_verifier())
+            .ok_or(PayrollError::NotInitialized)?;
+        env.storage()
+            .persistent()
+            .set(&key_verifier(), &verifier_contract);
+
+        match new_vk_hash {
+            Some(vk) => {
+                env.storage().persistent().set(&key_vk_hash(), &vk);
+                env.events().publish((symbol_short!("vk_hash"),), vk);
+            }
+            None => {
+                env.storage().persistent().remove(&key_vk_hash());
+            }
+        }
+
         env.events().publish(
-            (symbol_short!("claimset"),),
-            claim_contract,
+            (symbol_short!("set_ver"),),
+            (old_verifier, verifier_contract),
         );
 
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // set_paused
+    //
+    // Admin-only. Pauses or unpauses payroll batch executions.
+    // -----------------------------------------------------------------------
+    pub fn set_paused(env: Env, admin: Address, paused: bool) -> Result<(), PayrollError> {
+        Self::assert_initialized(&env)?;
+
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(PayrollError::Unauthorized);
+        }
+
+        env.storage().persistent().set(&key_paused(), &paused);
+
+        env.events().publish((symbol_short!("pause"),), paused);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // transfer_admin
+    //
+    // Step 1 of two-step admin rotation. Admin sets `new_admin` as pending.
+    // Rejects new_admin == admin to avoid redundant pending states.
+    // -----------------------------------------------------------------------
+    pub fn transfer_admin(
+        env: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), PayrollError> {
+        Self::assert_initialized(&env)?;
+
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(PayrollError::Unauthorized);
+        }
+        if new_admin == admin {
+            return Err(PayrollError::SameAdmin);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&key_pending_admin(), &new_admin);
+
+        env.events()
+            .publish((symbol_short!("adm_xfer"),), (admin, new_admin));
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // cancel_admin_transfer
+    //
+    // Admin-only. Cancels an active pending admin transfer.
+    // -----------------------------------------------------------------------
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), PayrollError> {
+        Self::assert_initialized(&env)?;
+
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(PayrollError::Unauthorized);
+        }
+
+        if !env.storage().persistent().has(&key_pending_admin()) {
+            return Err(PayrollError::NoPendingAdmin);
+        }
+
+        env.storage().persistent().remove(&key_pending_admin());
+
+        env.events().publish((symbol_short!("adm_canc"),), admin);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // accept_admin
+    //
+    // Step 2 of two-step admin rotation. `new_admin` claims the admin role.
+    // -----------------------------------------------------------------------
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), PayrollError> {
+        Self::assert_initialized(&env)?;
+
+        new_admin.require_auth();
+        let pending_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_pending_admin())
+            .ok_or(PayrollError::NoPendingAdmin)?;
+        if new_admin != pending_admin {
+            return Err(PayrollError::Unauthorized);
+        }
+
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
+        env.storage().persistent().set(&key_admin(), &new_admin);
+        env.storage().persistent().remove(&key_pending_admin());
+
+        env.events()
+            .publish((symbol_short!("adm_acc"),), (old_admin, new_admin));
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Config getters
+    // -----------------------------------------------------------------------
+
+    pub fn get_admin(env: Env) -> Result<Address, PayrollError> {
+        Self::assert_initialized(&env)?;
+        env.storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)
+    }
+
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        Self::assert_initialized(&env).ok()?;
+        env.storage().persistent().get(&key_pending_admin())
+    }
+
+    pub fn get_verifier(env: Env) -> Result<Address, PayrollError> {
+        Self::assert_initialized(&env)?;
+        env.storage()
+            .persistent()
+            .get(&key_verifier())
+            .ok_or(PayrollError::NotInitialized)
+    }
+
+    pub fn get_token(env: Env) -> Result<Address, PayrollError> {
+        Self::assert_initialized(&env)?;
+        env.storage()
+            .persistent()
+            .get(&key_token())
+            .ok_or(PayrollError::NotInitialized)
+    }
+
+    pub fn get_claim_contract(env: Env) -> Option<Address> {
+        Self::assert_initialized(&env).ok()?;
+        env.storage().persistent().get(&key_claim())
+    }
+
+    pub fn get_vk_hash(env: Env) -> Option<BytesN<32>> {
+        Self::assert_initialized(&env).ok()?;
+        env.storage().persistent().get(&key_vk_hash())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        if Self::assert_initialized(&env).is_err() {
+            return false;
+        }
+        env.storage()
+            .persistent()
+            .get(&key_paused())
+            .unwrap_or(false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Note on token immutability:
+    // The SEP-41 token address (`token`) is intentionally immutable once set in
+    // `initialize`. Modifying the token would break accounting invariants for
+    // existing deposited pool balance and escrow, risking unauthorized asset
+    // substitution or insolvency. If a different token asset is needed, a new
+    // Payroll contract instance must be deployed.
+    // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // Internal helpers
@@ -544,7 +758,7 @@ mod tests {
     #[test]
     fn test_initialize_sets_initial_state() {
         let env = Env::default();
-        let (admin, payroll_id, _xlm_id, _claim_id) = setup_ok(&env);
+        let (_admin, payroll_id, _xlm_id, _claim_id) = setup_ok(&env);
         let client = PayrollContractClient::new(&env, &payroll_id);
 
         assert_eq!(client.get_epoch(), 0u64);
@@ -615,13 +829,8 @@ mod tests {
         let proof = Bytes::from_slice(&env, &[0u8; 256]);
         let signals: Vec<BytesN<32>> = Vec::new(&env);
 
-        let result = client.execute_payroll(
-            &admin,
-            &proof,
-            &signals,
-            &nullifiers,
-            &100_0000000i128,
-        );
+        let result =
+            client.execute_payroll(&admin, &proof, &signals, &nullifiers, &100_0000000i128);
         assert!(result);
 
         assert_eq!(client.get_pool_balance(), 400_0000000i128);
@@ -750,13 +959,8 @@ mod tests {
         let proof = Bytes::from_slice(&env, &[0u8; 256]);
         let signals: Vec<BytesN<32>> = Vec::new(&env);
 
-        let result = client.try_execute_payroll(
-            &attacker,
-            &proof,
-            &signals,
-            &nullifiers,
-            &10_0000000i128,
-        );
+        let result =
+            client.try_execute_payroll(&attacker, &proof, &signals, &nullifiers, &10_0000000i128);
         assert!(result.is_err());
     }
 
@@ -796,5 +1000,162 @@ mod tests {
 
         let result = client.try_fund_pool(&admin, &0i128);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_getters() {
+        let env = Env::default();
+        let (admin, payroll_id, xlm_id, claim_id) = setup_ok(&env);
+        let client = PayrollContractClient::new(&env, &payroll_id);
+
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_token(), xlm_id);
+        assert_eq!(client.get_claim_contract(), Some(claim_id));
+        assert_eq!(client.get_pending_admin(), None);
+        assert_eq!(client.is_paused(), false);
+        assert_eq!(client.get_vk_hash(), None);
+
+        // Setting vk_hash updates getter
+        let hash = BytesN::from_array(&env, &[0xAAu8; 32]);
+        client.set_verifier_vk_hash(&admin, &hash);
+        assert_eq!(client.get_vk_hash(), Some(hash));
+    }
+
+    #[test]
+    fn test_set_verifier_happy_and_unauthorized() {
+        let env = Env::default();
+        let (admin, payroll_id, _xlm_id, _claim_id) = setup_ok(&env);
+        let client = PayrollContractClient::new(&env, &payroll_id);
+
+        let new_verifier = env.register(mock_ok::MockOk, ());
+        let attacker = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[0xBBu8; 32]);
+
+        // Non-admin rejected
+        let fail_res = client.try_set_verifier(&attacker, &new_verifier, &Some(hash.clone()));
+        assert!(fail_res.is_err());
+
+        // Admin succeeds and updates vk_hash
+        client.set_verifier(&admin, &new_verifier, &Some(hash.clone()));
+        assert_eq!(client.get_verifier(), new_verifier);
+        assert_eq!(client.get_vk_hash(), Some(hash));
+
+        // Setting another verifier with None clears stale vk_hash
+        let another_verifier = env.register(mock_ok::MockOk, ());
+        client.set_verifier(&admin, &another_verifier, &None);
+        assert_eq!(client.get_verifier(), another_verifier);
+        assert_eq!(client.get_vk_hash(), None);
+    }
+
+    #[test]
+    fn test_set_paused_halts_and_resumes_payroll() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let xlm_id = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let verifier_id = env.register(mock_ok::MockOk, ());
+        let claim_id = env.register(mock_claim::MockClaim, ());
+        let payroll_id = env.register(PayrollContract, ());
+        let client = PayrollContractClient::new(&env, &payroll_id);
+        client.initialize(&admin, &verifier_id, &xlm_id);
+        client.set_claim_contract(&admin, &claim_id);
+
+        let xlm = token::StellarAssetClient::new(&env, &xlm_id);
+        xlm.mint(&admin, &1_000_0000000i128);
+        client.fund_pool(&admin, &500_0000000i128);
+
+        let mut nullifiers: Vec<BytesN<32>> = Vec::new(&env);
+        nullifiers.push_back(BytesN::from_array(&env, &[0x11u8; 32]));
+        let proof = Bytes::from_slice(&env, &[0u8; 256]);
+        let signals: Vec<BytesN<32>> = Vec::new(&env);
+
+        // Non-admin cannot pause
+        let unauth = client.try_set_paused(&attacker, &true);
+        assert!(unauth.is_err());
+
+        // Admin pauses
+        client.set_paused(&admin, &true);
+        assert!(client.is_paused());
+
+        // While paused, execute_payroll must fail with ContractPaused
+        let paused_err =
+            client.try_execute_payroll(&admin, &proof, &signals, &nullifiers, &50_0000000i128);
+        assert_eq!(paused_err, Err(Ok(PayrollError::ContractPaused)));
+
+        // Unpause
+        client.set_paused(&admin, &false);
+        assert!(!client.is_paused());
+
+        // execute_payroll succeeds after unpause
+        let ok_res = client.execute_payroll(&admin, &proof, &signals, &nullifiers, &50_0000000i128);
+        assert!(ok_res);
+    }
+
+    #[test]
+    fn test_two_step_admin_transfer_full_lifecycle() {
+        let env = Env::default();
+        let (admin, payroll_id, _xlm_id, _claim_id) = setup_ok(&env);
+        let client = PayrollContractClient::new(&env, &payroll_id);
+
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        // Transfer to self rejected
+        let same_admin = client.try_transfer_admin(&admin, &admin);
+        assert_eq!(same_admin, Err(Ok(PayrollError::SameAdmin)));
+
+        // Non-admin cannot initiate transfer
+        let unauth_transfer = client.try_transfer_admin(&attacker, &new_admin);
+        assert!(unauth_transfer.is_err());
+
+        // Calling accept_admin when no transfer is pending fails
+        let no_pending = client.try_accept_admin(&new_admin);
+        assert_eq!(no_pending, Err(Ok(PayrollError::NoPendingAdmin)));
+
+        // Admin initiates transfer
+        client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        assert_eq!(client.get_admin(), admin);
+
+        // Admin cancels transfer
+        client.cancel_admin_transfer(&admin);
+        assert_eq!(client.get_pending_admin(), None);
+
+        // Re-initiate transfer
+        client.transfer_admin(&admin, &new_admin);
+
+        // Attacker cannot accept admin
+        let attacker_accept = client.try_accept_admin(&attacker);
+        assert!(attacker_accept.is_err());
+
+        // Designated new_admin accepts admin
+        client.accept_admin(&new_admin);
+        assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_pending_admin(), None);
+
+        // Old admin can no longer perform admin actions
+        let old_admin_action = client.try_set_paused(&admin, &true);
+        assert!(old_admin_action.is_err());
+
+        // New admin can perform admin actions
+        client.set_paused(&new_admin, &true);
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_payroll_admin_auth_verification() {
+        let env = Env::default();
+        let (admin, payroll_id, _xlm_id, _claim_id) = setup_ok(&env);
+        let client = PayrollContractClient::new(&env, &payroll_id);
+
+        client.set_paused(&admin, &true);
+
+        let auths = env.auths();
+        assert!(!auths.is_empty());
+        assert_eq!(auths[0].0, admin);
     }
 }
