@@ -162,41 +162,58 @@ Holds escrow released by `payroll.execute_payroll` and pays out individual emplo
 
 ### Contract configuration & administrative procedures
 
-#### 1. Verifier rotation
+#### 1. Verifier rotation & cross-contract ordering
 If a circuit is recompiled or upgraded with new parameters and a new `groth16_verifier` instance is deployed:
 ```bash
-# Update payroll contract verifier
+# Update payroll contract verifier (updates or clears vk_hash to keep off-chain verifiers in sync)
 soroban contract invoke --id $PAYROLL_CONTRACT_ID --source admin -- \
-  set_verifier --admin $ADMIN_ADDRESS --verifier_contract $NEW_PAYROLL_VERIFIER_ID
+  set_verifier --admin $ADMIN_ADDRESS --verifier_contract $NEW_PAYROLL_VERIFIER_ID --new_vk_hash $NEW_VK_HASH
 
-# Update claim contract verifier
+# Propose claim contract verifier (enforces 17,280-ledger timelock against instant adverse verifier swaps)
 soroban contract invoke --id $CLAIM_CONTRACT_ID --source admin -- \
-  set_verifier --admin $ADMIN_ADDRESS --verifier_contract $NEW_CLAIM_VERIFIER_ID
+  propose_verifier --admin $ADMIN_ADDRESS --verifier_contract $NEW_CLAIM_VERIFIER_ID
+
+# After the timelock elapses (ROTATION_DELAY_LEDGERS):
+soroban contract invoke --id $CLAIM_CONTRACT_ID --source admin -- \
+  execute_verifier --admin $ADMIN_ADDRESS
 ```
 
-#### 2. Two-step admin transfer
-To prevent accidental contract lockouts from mistyped addresses, admin transfers require two steps:
-1. Current admin nominates candidate:
+**Recommended Rotation Order & Cross-Contract Window**:
+Verifier rotation across `payroll` and `claim` involves two separate transactions. Consequently, there is an unavoidable window where the two contracts operate with different verifiers.
+- **Recommended Sequence**: Rotate `payroll` first, wait out the `claim` timelock, then execute `claim` verifier rotation. This ensures no new batches are posted under the old circuit while existing claims generated under the previous batch epoch can still be finalized against the claim contract.
+- To eliminate any operational race conditions during migration, pause `payroll` first using `set_paused` while leaving `claim` unpaused so employees can settle outstanding proofs.
+
+#### 2. Cross-contract pause semantics
+- Pausing `PayrollContract` halts new `execute_payroll` batch distributions, preventing further pool deductions and new escrow releases.
+- **Independent Escrow Protection**: Pausing `PayrollContract` does **not** stop employees from claiming payouts against escrow already funded and held in `ClaimContract`. This is intentional by design so employees can claim previously verified earnings without being blocked by routine payroll batch maintenance.
+- **Full Emergency Halt**: To halt both new batch executions AND claim withdrawals simultaneously (e.g. during an active incident or security investigation), the admin must invoke `set_paused(true)` on **both** contracts independently.
+
+#### 3. Two-step admin transfer & cancellation
+To prevent accidental contract lockouts from mistyped addresses or unintended assignments:
+1. Current admin nominates candidate (rejects `new_admin == admin`):
    ```bash
    soroban contract invoke --id $CONTRACT_ID --source admin -- \
      transfer_admin --admin $ADMIN_ADDRESS --new_admin $NEW_ADMIN_ADDRESS
    ```
-2. Nominated address claims administration:
+2. (Optional) Admin may cancel a pending transfer at any time prior to acceptance:
+   ```bash
+   soroban contract invoke --id $CONTRACT_ID --source admin -- \
+     cancel_admin_transfer --admin $ADMIN_ADDRESS
+   ```
+3. Nominated address claims administration:
    ```bash
    soroban contract invoke --id $CONTRACT_ID --source new_admin -- \
      accept_admin --new_admin $NEW_ADMIN_ADDRESS
    ```
 
-#### 3. Emergency pause
-During incidents, migrations, or contract relinking:
-```bash
-soroban contract invoke --id $CONTRACT_ID --source admin -- \
-  set_paused --admin $ADMIN_ADDRESS --paused true
-```
-Unpausing restores normal batch execution and claim withdrawals.
+#### 4. Payroll contract migration & epoch continuity
+If the claim contract must be re-linked to an updated payroll contract:
+1. Admin proposes new payroll contract via `propose_payroll_contract(admin, new_payroll)`.
+2. After `ROTATION_DELAY_LEDGERS` elapses, admin executes `execute_payroll_contract(admin)`.
+3. **Epoch Continuity Invariant**: Execution strictly requires that `new_payroll.get_epoch() >= current_payroll.get_epoch()`. This prevents epoch regression that would desynchronize or block valid employee claims for earlier epochs.
 
-#### 4. Token immutability
-The pool token address (`token`) is immutable on both contracts once set in `initialize`. Allowing token rotation would compromise escrow invariants and create asset-substitution attack vectors. Supporting a new token requires deploying fresh contract instances.
+#### 5. Token immutability
+The pool token address (`token`) is intentionally immutable on both contracts once set in `initialize`. Allowing token rotation would compromise escrow invariants and create asset-substitution attack vectors. Supporting a new token requires deploying fresh contract instances.
 
 ## Two-step payroll flow, in detail
 

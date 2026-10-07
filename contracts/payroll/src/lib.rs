@@ -59,6 +59,8 @@ pub enum PayrollError {
     ContractPaused = 9,
     /// No pending admin transfer exists to accept.
     NoPendingAdmin = 10,
+    /// Proposed new admin is identical to current admin.
+    SameAdmin = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -432,11 +434,15 @@ impl PayrollContract {
     // set_verifier
     //
     // Admin-only. Rotates the Groth16 verifier contract address.
+    // If `new_vk_hash` is provided (Some), updates the stored VK digest.
+    // If None is provided, clears the stored VK digest so off-chain clients
+    // never see a stale verification key hash for the rotated verifier.
     // -----------------------------------------------------------------------
     pub fn set_verifier(
         env: Env,
         admin: Address,
         verifier_contract: Address,
+        new_vk_hash: Option<BytesN<32>>,
     ) -> Result<(), PayrollError> {
         Self::assert_initialized(&env)?;
 
@@ -458,6 +464,16 @@ impl PayrollContract {
         env.storage()
             .persistent()
             .set(&key_verifier(), &verifier_contract);
+
+        match new_vk_hash {
+            Some(vk) => {
+                env.storage().persistent().set(&key_vk_hash(), &vk);
+                env.events().publish((symbol_short!("vk_hash"),), vk);
+            }
+            None => {
+                env.storage().persistent().remove(&key_vk_hash());
+            }
+        }
 
         env.events().publish(
             (symbol_short!("set_ver"),),
@@ -496,6 +512,7 @@ impl PayrollContract {
     // transfer_admin
     //
     // Step 1 of two-step admin rotation. Admin sets `new_admin` as pending.
+    // Rejects new_admin == admin to avoid redundant pending states.
     // -----------------------------------------------------------------------
     pub fn transfer_admin(
         env: Env,
@@ -513,6 +530,9 @@ impl PayrollContract {
         if admin != stored_admin {
             return Err(PayrollError::Unauthorized);
         }
+        if new_admin == admin {
+            return Err(PayrollError::SameAdmin);
+        }
 
         env.storage()
             .persistent()
@@ -520,6 +540,35 @@ impl PayrollContract {
 
         env.events()
             .publish((symbol_short!("adm_xfer"),), (admin, new_admin));
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // cancel_admin_transfer
+    //
+    // Admin-only. Cancels an active pending admin transfer.
+    // -----------------------------------------------------------------------
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), PayrollError> {
+        Self::assert_initialized(&env)?;
+
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin())
+            .ok_or(PayrollError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(PayrollError::Unauthorized);
+        }
+
+        if !env.storage().persistent().has(&key_pending_admin()) {
+            return Err(PayrollError::NoPendingAdmin);
+        }
+
+        env.storage().persistent().remove(&key_pending_admin());
+
+        env.events().publish((symbol_short!("adm_canc"),), admin);
 
         Ok(())
     }
@@ -569,6 +618,7 @@ impl PayrollContract {
     }
 
     pub fn get_pending_admin(env: Env) -> Option<Address> {
+        Self::assert_initialized(&env).ok()?;
         env.storage().persistent().get(&key_pending_admin())
     }
 
@@ -589,14 +639,19 @@ impl PayrollContract {
     }
 
     pub fn get_claim_contract(env: Env) -> Option<Address> {
+        Self::assert_initialized(&env).ok()?;
         env.storage().persistent().get(&key_claim())
     }
 
     pub fn get_vk_hash(env: Env) -> Option<BytesN<32>> {
+        Self::assert_initialized(&env).ok()?;
         env.storage().persistent().get(&key_vk_hash())
     }
 
     pub fn is_paused(env: Env) -> bool {
+        if Self::assert_initialized(&env).is_err() {
+            return false;
+        }
         env.storage()
             .persistent()
             .get(&key_paused())
@@ -974,14 +1029,22 @@ mod tests {
 
         let new_verifier = env.register(mock_ok::MockOk, ());
         let attacker = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[0xBBu8; 32]);
 
         // Non-admin rejected
-        let fail_res = client.try_set_verifier(&attacker, &new_verifier);
+        let fail_res = client.try_set_verifier(&attacker, &new_verifier, &Some(hash.clone()));
         assert!(fail_res.is_err());
 
-        // Admin succeeds
-        client.set_verifier(&admin, &new_verifier);
+        // Admin succeeds and updates vk_hash
+        client.set_verifier(&admin, &new_verifier, &Some(hash.clone()));
         assert_eq!(client.get_verifier(), new_verifier);
+        assert_eq!(client.get_vk_hash(), Some(hash));
+
+        // Setting another verifier with None clears stale vk_hash
+        let another_verifier = env.register(mock_ok::MockOk, ());
+        client.set_verifier(&admin, &another_verifier, &None);
+        assert_eq!(client.get_verifier(), another_verifier);
+        assert_eq!(client.get_vk_hash(), None);
     }
 
     #[test]
@@ -1041,6 +1104,10 @@ mod tests {
         let new_admin = Address::generate(&env);
         let attacker = Address::generate(&env);
 
+        // Transfer to self rejected
+        let same_admin = client.try_transfer_admin(&admin, &admin);
+        assert_eq!(same_admin, Err(Ok(PayrollError::SameAdmin)));
+
         // Non-admin cannot initiate transfer
         let unauth_transfer = client.try_transfer_admin(&attacker, &new_admin);
         assert!(unauth_transfer.is_err());
@@ -1053,6 +1120,13 @@ mod tests {
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
         assert_eq!(client.get_admin(), admin);
+
+        // Admin cancels transfer
+        client.cancel_admin_transfer(&admin);
+        assert_eq!(client.get_pending_admin(), None);
+
+        // Re-initiate transfer
+        client.transfer_admin(&admin, &new_admin);
 
         // Attacker cannot accept admin
         let attacker_accept = client.try_accept_admin(&attacker);
@@ -1070,5 +1144,18 @@ mod tests {
         // New admin can perform admin actions
         client.set_paused(&new_admin, &true);
         assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_payroll_admin_auth_verification() {
+        let env = Env::default();
+        let (admin, payroll_id, _xlm_id, _claim_id) = setup_ok(&env);
+        let client = PayrollContractClient::new(&env, &payroll_id);
+
+        client.set_paused(&admin, &true);
+
+        let auths = env.auths();
+        assert!(!auths.is_empty());
+        assert_eq!(auths[0].0, admin);
     }
 }
