@@ -1,5 +1,7 @@
 # MeritPay Contracts
 
+[![CI](https://github.com/MeritPay/MeritPay-Contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/MeritPay/MeritPay-Contracts/actions/workflows/ci.yml)
+
 MeritPay is a zero-knowledge payroll system built on **Stellar Soroban**. Employees prove their KPI metrics (hours worked, sales targets, etc.) in zero-knowledge, an employer submits a single **batch Groth16 proof** to release a payroll pool on-chain, and each employee then **individually claims** their payout with a second Groth16 proof — without ever revealing raw KPI data or individual salaries on-chain.
 
 This repository contains the ZK circuits (Circom) and the Soroban smart contracts (Rust) that make up the on-chain half of the system. The Next.js frontend that drives proof generation and wallet interaction lives in a sibling repository.
